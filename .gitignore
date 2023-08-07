@@ -1,3 +1,6 @@
+rust/ares/src/pma/bin
+rust/ares/src/pma/dep
+rust/ares/src/pma/obj
 ships/
 *.backup
 urbit

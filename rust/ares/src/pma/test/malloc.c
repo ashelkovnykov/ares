@@ -1419,7 +1419,7 @@ test_pma_load(void) {
   assert(0 == pma_close(0, 1, 0));
   snapshot_fd = open(snapshot_path, PMA_NEW_FILE_FLAGS, PMA_FILE_PERMISSIONS);
   assert(0 < snapshot_fd);
-  pwrite(snapshot_fd, &bad_code, 8, 0);
+  assert(8 == pwrite(snapshot_fd, &bad_code, 8, 0));
 
   res = pma_load(_test_state->dir);
   assert(0 == res.epoch);
@@ -1437,7 +1437,7 @@ test_pma_load(void) {
   assert(0 == pma_close(0, 1, 0));
   snapshot_fd = open(snapshot_path, PMA_NEW_FILE_FLAGS, PMA_FILE_PERMISSIONS);
   assert(0 < snapshot_fd);
-  pwrite(snapshot_fd, &bad_version, 4, 12);
+  assert(4 == pwrite(snapshot_fd, &bad_version, 4, 12));
 
   res = pma_load(_test_state->dir);
   assert(0 == res.epoch);
@@ -1455,8 +1455,8 @@ test_pma_load(void) {
   assert(0 == pma_close(0, 1, 0));
   snapshot_fd = open(snapshot_path, PMA_NEW_FILE_FLAGS, PMA_FILE_PERMISSIONS);
   assert(0 < snapshot_fd);
-  pwrite(snapshot_fd, &bad_checksum, 4, 8);
-  pwrite(snapshot_fd, &bad_checksum, 4, (PMA_PAGE_SIZE + 8));
+  assert(4 == pwrite(snapshot_fd, &bad_checksum, 4, 8));
+  assert(4 == pwrite(snapshot_fd, &bad_checksum, 4, (PMA_PAGE_SIZE + 8)));
 
   res = pma_load(_test_state->dir);
   assert(0 == res.epoch);
@@ -1474,8 +1474,8 @@ test_pma_load(void) {
   assert(0 == pma_close(1, 2, 3));
   snapshot_fd = open(snapshot_path, PMA_NEW_FILE_FLAGS, PMA_FILE_PERMISSIONS);
   assert(0 < snapshot_fd);
-  pwrite(snapshot_fd, &bad_checksum, 4, 8);
-  pwrite(snapshot_fd, &old_event, 8, (PMA_PAGE_SIZE + 24));
+  assert(4 == pwrite(snapshot_fd, &bad_checksum, 4, 8));
+  assert(8 == pwrite(snapshot_fd, &old_event, 8, (PMA_PAGE_SIZE + 24)));
 
   res = pma_load(_test_state->dir);
   assert(0 == res.epoch);
