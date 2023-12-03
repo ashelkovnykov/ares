@@ -28,6 +28,13 @@ crate::gdb!();
 
 const FLAG_TRACE: u32 = 1 << 8;
 
+#[allow(dead_code)]
+const LOAD_AXIS: u64 = 4;
+const PEEK_AXIS: u64 = 22;
+const POKE_AXIS: u64 = 23;
+#[allow(dead_code)]
+const WISH_AXIS: u64 = 10;
+
 struct Context {
     epoch: u64,
     event_num: u64,
@@ -42,7 +49,7 @@ impl Context {
         // TODO: switch to Pma when ready
         // let snap = &mut snapshot::pma::Pma::new(snap_path);
         let mut snapshot = DoubleJam::new(snap_path);
-        let mut stack = NockStack::new(1024 << 10 << 10, 0);
+        let mut stack = NockStack::new(256 << 10 << 10, 0);
         let newt = Newt::new();
         let cache = Hamt::<Noun>::new();
 
@@ -162,13 +169,6 @@ impl Context {
             .work_bail(&mut self.nock_context.stack, lud);
     }
 }
-
-#[allow(dead_code)]
-const LOAD_AXIS: u64 = 4;
-const PEEK_AXIS: u64 = 22;
-const POKE_AXIS: u64 = 23;
-#[allow(dead_code)]
-const WISH_AXIS: u64 = 10;
 
 // Necessary because Arc::new is not const
 lazy_static! {

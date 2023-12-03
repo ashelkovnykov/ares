@@ -8,18 +8,21 @@ use either::Either::{self, Left, Right};
 use ibig::Stack;
 use libc::{c_void, memcmp};
 use memmap::MmapMut;
-use std::alloc::Layout;
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::RefCell;
 use std::mem;
 use std::ptr;
-use std::ptr::copy_nonoverlapping;
+use std::ptr::{copy_nonoverlapping, null_mut};
 
 crate::gdb!();
+
+/** Maximum supported alignment */
+const MAX_ALIGN: usize = 64;
 
 /** Number of reserved slots for alloc_pointer and frame_pointer in each frame */
 pub const RESERVED: usize = 3;
 
-/** Word offsets for alloc and frame pointers  */
+/** Word offsets for alloc and frame pointers */
 pub const FRAME: usize = 0;
 pub const STACK: usize = 1;
 pub const ALLOC: usize = 2;
@@ -61,7 +64,8 @@ impl NockStack {
      * The initial frame is a west frame. When the stack is initialized, a number of slots is given.
      * We add three extra slots to store the “previous” frame, stack, and allocation pointer. For the
      * initial frame, the previous allocation pointer is set to the beginning (low boundary) of the
-     * arena, the previous frame pointer is set to NULL, and the previous stack pointer is set to NULL */
+     * arena, the previous frame pointer is set to NULL, and the previous stack pointer is set to NULL
+     */
 
     /** size is in 64-bit (i.e. 8-byte) words.
      * top_slots is how many slots to allocate to the top stack frame.
@@ -326,7 +330,13 @@ impl NockStack {
 
     /** Allocate space for an alloc::Layout in a stack frame */
     unsafe fn layout_alloc(&self, layout: Layout) -> *mut u64 {
-        assert!(layout.align() <= 64, "layout alignment must be <= 64");
+        if layout.align() > MAX_ALIGN {
+            panic!("layout alignment must be <= {}", MAX_ALIGN);
+            // return null_mut();
+        }
+
+        //  XX: guard page check goes here
+
         self.raw_alloc((layout.size() + 7) >> 3)
     }
 
@@ -844,6 +854,31 @@ impl NockStack {
                 true
             }
         }
+    }
+}
+
+unsafe impl GlobalAlloc for NockStack {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.layout_alloc(layout) as *mut u8
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = self.alloc(layout);
+        if !ptr.is_null() {
+            ptr::write_bytes(ptr, 0, layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn realloc(&self, _ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        match Layout::from_size_align(new_size, layout.align()) {
+            Ok(new_layout) => self.alloc(new_layout),
+            Err(_) => null_mut(),
+        }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // No-op
     }
 }
 
