@@ -226,42 +226,23 @@ impl NockStack {
         alloc
     }
 
-    /** Allocate space for an indirect pointer in a west frame */
-    unsafe fn indirect_alloc_west(&mut self, words: usize) -> *mut u64 {
-        self.raw_alloc_west(words + 2)
-    }
-
-    /** Allocate space for an indirect pointer in an east frame */
-    unsafe fn indirect_alloc_east(&mut self, words: usize) -> *mut u64 {
-        self.raw_alloc_east(words + 2)
+    /** Bump the alloc pointer to make space for an allocation */
+    unsafe fn raw_alloc(&mut self, words: usize) -> *mut u64 {
+        if self.is_west() {
+            self.raw_alloc_west(words)
+        } else {
+            self.raw_alloc_east(words)
+        }
     }
 
     /** Allocate space for an indirect pointer in a stack frame */
     unsafe fn indirect_alloc(&mut self, words: usize) -> *mut u64 {
-        if self.is_west() {
-            self.indirect_alloc_west(words)
-        } else {
-            self.indirect_alloc_east(words)
-        }
-    }
-
-    /** Allocate space for a struct in a west frame */
-    unsafe fn struct_alloc_west<T>(&mut self, count: usize) -> *mut T {
-        self.raw_alloc_west(word_size_of::<T>() * count) as *mut T
-    }
-
-    /** Allocate space for a struct in an east frame */
-    unsafe fn struct_alloc_east<T>(&mut self, count: usize) -> *mut T {
-        self.raw_alloc_east(word_size_of::<T>() * count) as *mut T
+        self.raw_alloc(words + 2)
     }
 
     /** Allocate space for a struct in a stack frame */
     pub unsafe fn struct_alloc<T>(&mut self, count: usize) -> *mut T {
-        if self.is_west() {
-            self.struct_alloc_west::<T>(count)
-        } else {
-            self.struct_alloc_east::<T>(count)
-        }
+        self.raw_alloc(word_size_of::<T>() * count) as *mut T
     }
 
     unsafe fn struct_alloc_in_previous_frame_west<T>(&mut self, count: usize) -> *mut T {
@@ -319,11 +300,7 @@ impl NockStack {
     /** Allocate space for an alloc::Layout in a stack frame */
     unsafe fn layout_alloc(&mut self, layout: Layout) -> *mut u64 {
         assert!(layout.align() <= 64, "layout alignment must be <= 64");
-        if self.is_west() {
-            self.raw_alloc_west((layout.size() + 7) >> 3)
-        } else {
-            self.raw_alloc_east((layout.size() + 7) >> 3)
-        }
+        self.raw_alloc((layout.size() + 7) >> 3)
     }
 
     /**  Copying and Popping
