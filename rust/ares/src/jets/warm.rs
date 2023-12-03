@@ -13,7 +13,7 @@ impl Preserve for Warm {
     unsafe fn assert_in_stack(&self, stack: &NockStack) {
         self.0.assert_in_stack(stack);
     }
-    unsafe fn preserve(&mut self, stack: &mut NockStack) {
+    unsafe fn preserve(&mut self, stack: &NockStack) {
         self.0.preserve(stack);
     }
 }
@@ -46,7 +46,7 @@ impl Preserve for WarmEntry {
             cursor = (*cursor.0).next;
         }
     }
-    unsafe fn preserve(&mut self, stack: &mut NockStack) {
+    unsafe fn preserve(&mut self, stack: &NockStack) {
         if self.0.is_null() {
             return;
         }

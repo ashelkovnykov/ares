@@ -10,7 +10,7 @@ pub(crate) struct MemoryAllocation {
 }
 
 pub trait Stack: Sized {
-    unsafe fn alloc_layout(&mut self, layout: Layout) -> *mut u64;
+    unsafe fn alloc_layout(&self, layout: Layout) -> *mut u64;
 }
 
 /// Chunk of memory.

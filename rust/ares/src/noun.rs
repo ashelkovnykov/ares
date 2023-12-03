@@ -1235,10 +1235,10 @@ pub trait NounAllocator: Sized {
      *
      * This should allocate *two more* `u64`s than `words` to make space for the size and metadata
      */
-    unsafe fn alloc_indirect(&mut self, words: usize) -> *mut u64;
+    unsafe fn alloc_indirect(&self, words: usize) -> *mut u64;
 
     /** Allocate memory for a cell */
-    unsafe fn alloc_cell(&mut self) -> *mut CellMemory;
+    unsafe fn alloc_cell(&self) -> *mut CellMemory;
 }
 
 /**

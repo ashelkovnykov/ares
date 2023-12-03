@@ -47,7 +47,7 @@ impl Preserve for Batteries {
             cursor = (*cursor.0).parent_batteries;
         }
     }
-    unsafe fn preserve(&mut self, stack: &mut NockStack) {
+    unsafe fn preserve(&mut self, stack: &NockStack) {
         if self.0.is_null() {
             return;
         };
@@ -158,7 +158,7 @@ impl Preserve for BatteriesList {
             cursor = (*cursor.0).next;
         }
     }
-    unsafe fn preserve(&mut self, stack: &mut NockStack) {
+    unsafe fn preserve(&mut self, stack: &NockStack) {
         if self.0.is_null() {
             return;
         };
@@ -230,7 +230,7 @@ impl Preserve for NounList {
             cursor = (*cursor.0).next;
         }
     }
-    unsafe fn preserve(&mut self, stack: &mut NockStack) {
+    unsafe fn preserve(&mut self, stack: &NockStack) {
         if self.0.is_null() {
             return;
         };
@@ -298,7 +298,7 @@ impl Preserve for Cold {
         (*self.0).root_to_paths.assert_in_stack(stack);
         (*self.0).path_to_batteries.assert_in_stack(stack);
     }
-    unsafe fn preserve(&mut self, stack: &mut NockStack) {
+    unsafe fn preserve(&mut self, stack: &NockStack) {
         (*(self.0)).battery_to_paths.preserve(stack);
         (*(self.0)).root_to_paths.preserve(stack);
         (*(self.0)).path_to_batteries.preserve(stack);
