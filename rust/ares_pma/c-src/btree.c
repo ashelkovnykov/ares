@@ -15,19 +15,22 @@
 #include "btree.h"
 #include "lib/checksum.h"
 
-typedef uint32_t pgno_t;        /* a page number */
-typedef uint32_t vaof_t;        /* a virtual address offset */
-typedef uint32_t flag_t;
-typedef unsigned char BYTE;
+typedef uint32_t pgno_t;        // backing file page index
+typedef uint32_t vaof_t;        // virtual address page index
+typedef uint32_t flag_t;        // unused
+typedef unsigned char BYTE;     // byte alias; could just as easily be uint8_t
 
 //// ===========================================================================
-////                              tmp tmp tmp tmp tmp
-/* ;;: remove -- for debugging */
-/*
-  bp(X) where X is false will raise a SIGTRAP. If the process is being run
-  inside a debugger, this can be caught and ignored. It's equivalent to a
-  breakpoint. If run without a debugger, it will dump core, like an assert
-*/
+////                              debugging
+
+/**
+ * bp(X) where X is false will raise a SIGTRAP. If the process is being run
+ * inside a debugger, this can be caught and ignored. It's equivalent to a
+ * breakpoint. If run without a debugger, it will dump core, like an assert
+ * 
+ * These are just instructoin codes for causing a SIGTRAP; barter-simsum found
+ * them online for each architecture.
+ */
 #ifdef DEBUG
 #if defined(__i386__) || defined(__x86_64__)
 #define bp(x) do { if(!(x)) __asm__ volatile("int $3"); } while (0)
@@ -44,19 +47,20 @@ STATIC_ASSERT(0, "debugger break instruction unimplemented");
 #define bp(x) ((void)(0))
 #endif
 
-/* coalescing of memory freelist currently prohibited since we haven't
-   implemented coalescing of btree nodes (necessary) */
+// coalescing of memory freelist currently prohibited since we haven't
+// implemented coalescing of btree nodes (necessary)
 #define CAN_COALESCE 0
-/* ;;: remove once confident in logic and delete all code dependencies on
-     state->node_freelist */
 
-/* prints a node before and after a call to _bt_insertdat */
+// prints a node before and after a call to _bt_insertdat
 #define DEBUG_PRINTNODE 0
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(x, y) ((x) > (y) ? (y) : (x))
 #define ZERO(s, n) memset((s), 0, (n))
 
+/**
+ * Just a way to stylize printing hex numbers; not neccessary, but convenient
+ */
 #define S7(A, B, C, D, E, F, G) A##B##C##D##E##F##G
 #define S6(A, B, C, D, E, F, ...) S7(A, B, C, D, E, F, __VA_ARGS__)
 #define S5(A, B, C, D, E, ...) S6(A, B, C, D, E, __VA_ARGS__)
@@ -71,12 +75,11 @@ STATIC_ASSERT(0, "debugger break instruction unimplemented");
 #define TBYTES(x) ((size_t)(x) << 40)
 #define PBYTES(x) ((size_t)(x) << 50)
 
-/* 4K page in bytes */
+// convert # 16 KiB pages to bytes
 #define P2BYTES(x) ((size_t)(x) << BT_PAGEBITS)
-/* the opposite of P2BYTES */
+// convert bytes to # 16 KiB pages (rounding DOWN)
 #define B2PAGES(x) ((size_t)(x) >> BT_PAGEBITS)
 
-
 #define __packed        __attribute__((__packed__))
 #define UNUSED(x) ((void)(x))
 
@@ -89,42 +92,58 @@ STATIC_ASSERT(0, "debugger break instruction unimplemented");
 #define DPUTS(arg)	DPRINTF("%s", arg)
 #define TRACE(...) DPUTS("")
 
+
+//// ===========================================================================
+////                                  macros
+
+/**
+ * 0 is false in C; sometimes it's more convenient to test agaisnt a positive
+ * assertion
+ */
 #define BT_SUCC 0
 #define SUCC(x) ((x) == BT_SUCC)
 
-/* given a pointer p returns the low page-aligned addr */
+// given a pointer p returns the low page-aligned addr
 #define LO_ALIGN_PAGE(p) ((BT_page *)(((uintptr_t)p) & ~(BT_PAGESIZE - 1)))
 
-
 #define BT_MAPADDR  ((BYTE *) S(0x1000,0000,0000))
 
+/**
+ * convert a pointer into a virtual address page index
+ * 
+ * XX:  not a macro; shouldn't be in this section
+ */
 static inline vaof_t
 addr2off(void *p)
-/* convert a pointer into a 32-bit page offset */
 {
   uintptr_t pu = (uintptr_t)p;
   assert(pu >= (uintptr_t)BT_MAPADDR);
   pu -= (uintptr_t)BT_MAPADDR;
-  assert((pu & ((1 << BT_PAGEBITS) - 1)) == 0); /* p must be page-aligned */
+  assert((pu & (BT_PAGESIZE - 1)) == 0); /* p must be page-aligned */
   return (vaof_t)(pu >> BT_PAGEBITS);
 }
 
+/**
+ * convert a virtual address page index into a pointer
+ * 
+ * XX:  not a macro; shouldn't be in this section
+ */
 static inline void *
 off2addr(vaof_t off)
-/* convert a 32-bit page offset into a pointer */
 {
   uintptr_t pu = (uintptr_t)off << BT_PAGEBITS;
   pu += (uintptr_t)BT_MAPADDR;
   return (void *)pu;
 }
 
-#define BT_PAGEWORD 32ULL
-#define BT_NUMMETAS 2                     /* 2 metapages */
-#define BT_META_SECTION_WIDTH (BT_NUMMETAS * BT_PAGESIZE)
-#define BT_ADDRSIZE (BT_PAGESIZE << BT_PAGEWORD)
-#define PMA_GROW_SIZE_p (10000000)
-#define PMA_GROW_SIZE_b (BT_PAGESIZE * PMA_GROW_SIZE_p)
+#define BT_PAGEWORD 32ULL       // bit size of page offset
+#define BT_NUMMETAS 2           // # metadata pages
+#define BT_META_SECTION_WIDTH (BT_NUMMETAS * BT_PAGESIZE) // size of metadata block at start of snapshot
+#define BT_ADDRSIZE (BT_PAGESIZE << BT_PAGEWORD) // max number of bytes addressable
+#define PMA_GROW_SIZE_p (10000000) // number of pages by which the PMA grows on disk
+#define PMA_GROW_SIZE_b (BT_PAGESIZE * PMA_GROW_SIZE_p) // number of bytes by which the PMA grows on disk
 
+//  File offset of 0 is code for "free space"; pseudonym for "free space in file"
 #define BT_NOPAGE 0
 
 #define BT_PROT_CLEAN (PROT_READ)
@@ -134,124 +153,191 @@ off2addr(vaof_t off)
 #define BT_PROT_DIRTY (PROT_READ | PROT_WRITE)
 #define BT_FLAG_DIRTY (MAP_FIXED | MAP_SHARED)
 
-/*
-  FO2BY: file offset to byte
-  get byte INDEX into pma map from file offset
-*/
+/**
+ * convert page offset to bytes
+ * 
+ * used as a helper to get a byte index into the backing file for a page
+ * 
+ * XX:  repalce with P2BYTES
+ * XX:  only one usage
+ */
 #define FO2BY(fo)                               \
   ((uint64_t)(fo) << BT_PAGEBITS)
 
-/*
-  BY2FO: byte to file offset
-  get pgno from byte INDEX into pma map
-*/
+/**
+ * convert byte address to the offset of the page that contains it
+ * 
+ * XX:  replace with B2PAGES
+ * XX:  only one usage
+ */
 #define BY2FO(p)                                \
   ((pgno_t)((p) >> BT_PAGEBITS))
 
-/*
-  FO2PA: file offset to page
-  get a reference to a BT_page from a file offset
-
-  ;;: can simplify:
-
-  ((BT_page*)state->map)[fo]
-*/
+/**
+ * convert file offset to page of memory
+ * 
+ * XX:  only one usage
+ */
 #define FO2PA(map, fo)                          \
+  // XX:  replace with ((BT_page*)state->map)[fo]
   ((BT_page *)&(map)[FO2BY(fo)])
 
-/* NMEMB: number of members in array, a */
+/**
+ * number of members in array, a
+ * 
+ * XX:  only one usage
+ */
 #define NMEMB(a)                                \
+  // XX:  should be replaced by a constant
   (sizeof(a) / sizeof(a[0]))
 
+//  XX: can be replaced; originally we wrote our own version here
 #define offsetof(st, m) \
     __builtin_offsetof(st, m)
 
-
+
 //// ===========================================================================
 ////                                  btree types
 
-/*
-  btree page header. all pages share this header. Though for metapages, you can
-  expect it to be zeroed out.
-*/
+/**
+ * - 16KiB pages = 2^14 bytes
+ * - 48-bit addresses
+ * - 48 - 14 = 34
+ * - strip 2 bits and just use a uint32_t for page offsets
+ * - 46 = 64 TiB addressable space
+ * 
+ * - what is the branching factor of our B+ Tree?
+ * - B+ Tree contains N routing values & N+1 datum or child nodes
+ * - B+ Tree also needs to track which leaves/children are dirty
+ * - both datum & child nodes are page offsets, hence 32-bit numbers
+ * -    16384 > ((X + 7) / 8) + ((2X + 1) * 4)
+ * -    16384 > ((X + 7) / 8) + 8X + 4
+ * -   131072 > X + 7 + 64X + 32
+ * -   131072 > 65X + 39
+ * -   131033 > 65X
+ * -     2015 > X
+ * - branching factor is 2016
+ * - number of bytes required for the dirty bitmap is 2016 / 8 = 252
+ * 
+ * - what is the (maximum) depth of our B+ Tree?
+ * -    depth 1 = 2016 leaves = 31.5 MiB
+ * -    depth 2 = 4060225 leaves = 62.0 GiB
+ * -    depth 3 = 8181353375 leaves = 121.9 TiB
+ */
+
+/**
+ * btree page header. all pages share this header. Though for metapages, you can
+ * expect it to be zeroed out.
+ */
 typedef struct BT_pageheader BT_pageheader;
 struct BT_pageheader {
-  uint8_t  dirty[256];          /* dirty bit map */
+  //  XX: This should be 252 for a branching factor of 2016
+  uint8_t  dirty[256];      // dirty bit map
 } __packed;
 
-/*
-  btree key/value data format
-
-  BT_dat is used to provide a view of the data section in a BT_page where data is
-  stored like:
-        va  fo  va  fo
-  bytes 0   4   8   12
-
-  The convenience macros given an index into the data array do the following:
-  BT_dat_lo(i) returns ith   va (low addr)
-  BT_dat_hi(i) returns i+1th va (high addr)
-  BT_dat_fo(i) returns ith file offset
-*/
+/**
+ * btree key/value data format
+ *
+ * BT_dat is used to provide a view of the data section in a BT_page where data is
+ * stored like:
+ *       va  fo  va  fo
+ * bytes 0   4   8   12
+ *
+ * The convenience macros given an index into the data array do the following:
+ * BT_dat_lo(i) returns ith   va (low addr)
+ * BT_dat_hi(i) returns i+1th va (high addr)
+ * BT_dat_fo(i) returns ith file offset
+ */
 typedef union BT_dat BT_dat;
 union BT_dat {
-  vaof_t va;                    /* virtual address offset */
-  pgno_t fo;                    /* file offset */
+  vaof_t va;                    // virtual address offset
+  pgno_t fo;                    // file offset
 };
 
-/* like BT_dat but when a struct is more useful than a union */
+/**
+ * like BT_dat but when a struct is more useful than a union
+ */
 typedef struct BT_kv BT_kv;
 struct BT_kv {
   vaof_t va;
   pgno_t fo;
 };
 
-/* ;;: todo, perhaps rather than an index, return the data directly and typecast?? */
-#define BT_dat_lo(i) ((i) * 2)
-#define BT_dat_fo(i) ((i) * 2 + 1)
-#define BT_dat_hi(i) ((i) * 2 + 2)
+//  XX: unused
+// #define BT_dat_lo(i) ((i) * 2)
+// #define BT_dat_fo(i) ((i) * 2 + 1)
+// #define BT_dat_hi(i) ((i) * 2 + 2)
+//
+// #define BT_dat_lo2(I, dat)
+// #define BT_dat_fo2(I, dat)
+// #define BT_dat_hi2(I, dat)
+//
+// /* BT_dat_maxva: pointer to highest va in page data section */
+// #define BT_dat_maxva(p)                         \
+//   ((void *)&(p)->datd[BT_dat_lo(BT_DAT_MAXKEYS)])
+//
+// /* BT_dat_maxfo: pointer to highest fo in page data section */
+// #define BT_dat_maxfo(p)                         \
+//   ((void *)&(p)->datd[BT_dat_fo(BT_DAT_MAXVALS)])
 
-#define BT_dat_lo2(I, dat)
-#define BT_dat_fo2(I, dat)
-#define BT_dat_hi2(I, dat)
-
-/* BT_dat_maxva: pointer to highest va in page data section */
-#define BT_dat_maxva(p)                         \
-  ((void *)&(p)->datd[BT_dat_lo(BT_DAT_MAXKEYS)])
-
-/* BT_dat_maxfo: pointer to highest fo in page data section */
-#define BT_dat_maxfo(p)                         \
-  ((void *)&(p)->datd[BT_dat_fo(BT_DAT_MAXVALS)])
-
+// # free bytes in a B+ Tree page
 #define BT_DAT_MAXBYTES (BT_PAGESIZE - sizeof(BT_pageheader))
 #define BT_DAT_MAXENTRIES  (BT_DAT_MAXBYTES / sizeof(BT_dat))
+// same as above
 #define BT_DAT_MAXKEYS (BT_DAT_MAXENTRIES / 2)
-/* #define BT_DAT_MAXKEYS 10 */
+// same as above
 #define BT_DAT_MAXVALS BT_DAT_MAXKEYS
-static_assert(BT_DAT_MAXENTRIES % 2 == 0);
-/* we assume off_t is 64 bit */
+//  XX: should be (BT_DAT_MAXBYTES % ((2 * BT_BRANCHING) - 1)) == 0
+//static_assert(BT_DAT_MAXENTRIES % 2 == 0);
+// we assume off_t is 64 bit
 static_assert(sizeof(off_t) == sizeof(uint64_t));
 
-/*
-   all pages in the memory arena consist of a header and data section
-*/
+/**
+ * all B+ Tree pages consist of a header and data section
+ */
 typedef struct BT_page BT_page;
 struct BT_page {
-  BT_pageheader head;                    /* header */
-  union {                                /* data section */
-    BT_dat      datd[BT_DAT_MAXENTRIES]; /* union view */
-    BT_kv       datk[BT_DAT_MAXKEYS];    /* struct view */
-    BYTE        datc[BT_DAT_MAXBYTES];   /* byte-level view */
+  BT_pageheader head;                 // header
+  union {                             // data section
+    BT_dat datd[BT_DAT_MAXENTRIES];   // union view
+    BT_kv  datk[BT_DAT_MAXKEYS];      // struct view
+    BYTE   datc[BT_DAT_MAXBYTES];     // byte view
   };
 };
 static_assert(sizeof(BT_page) == BT_PAGESIZE);
 static_assert(BT_DAT_MAXBYTES % sizeof(BT_dat) == 0);
 
-#define BT_MAGIC   0xBADDBABE
-#define BT_VERSION 1
-/*
-   a meta page is like any other page, but the data section is used to store
-   additional information
-*/
+#define BT_MAGIC   0xBADDBABE     // magic code that denotes a file as a PMA
+#define BT_VERSION 1              // pma version
+
+/**
+ * - what's the maximum amount of space that the B+ Tree will require just for itself?
+ * - B+ Tree depth = 2
+ * - 1 + 2016 + 2016^2 = 4066273 pages
+ * - 4066273 pages = 65060368 KiB = 63536 MiB
+ * 
+ * - how many stripes will we need, and of what sizes?
+ * -  Current scheme:
+ * -    1       2 MiB       2 MiB
+ * -    2       8 MiB      10 MiB
+ * -    3      32 MiB      42 MiB
+ * -    4     128 MiB     170 MiB
+ * -    5     512 MiB     682 MiB
+ * -    6    2048 MiB    2730 MiB
+ * -    7    8192 MiB   10922 MiB
+ * -    8   32768 MiB   43690 MiB
+ * -    9   ????? MiB   ????? MiB
+ * 
+ * -  Proposed scheme:
+ * -    1       3 MiB       3 MiB
+ * -    2      12 MiB      15 MiB
+ * -    3      48 MiB      63 MiB
+ * -    4     192 MiB     255 MiB
+ * -    5     768 MiB    1023 MiB
+ * -    6    3072 MiB    4095 MiB
+ * -    7   12288 MiB   16383 MiB
+ * -    8   49152 MiB   65535 MiB
+ */
 #define BLK_BASE_LEN0 (MBYTES(2) - BT_META_SECTION_WIDTH)
 #define BLK_BASE_LEN1 (MBYTES(8))
 #define BLK_BASE_LEN2 (BLK_BASE_LEN1 * 4)
@@ -270,148 +356,205 @@ static_assert(BT_DAT_MAXBYTES % sizeof(BT_dat) == 0);
                              BLK_BASE_LEN5 +            \
                              BLK_BASE_LEN6 +            \
                              BLK_BASE_LEN7)
+
+/**
+ * a meta page is like any other page, but the data section is used to store
+ * additional information
+ */
 typedef struct BT_meta BT_meta;
 struct BT_meta {
 #define BT_NUMROOTS 32
-  uint32_t  magic;
-  uint32_t  version;
-  pgno_t    last_pg;            /* last page used in file */
+  uint32_t  magic;              // special code to identify file as PMA
+  uint32_t  version;            // version of PMA algorithm
+  pgno_t    last_pg;            // last page used in backing file
   uint32_t  _pad0;
-  uint64_t  txnid;
-  void     *fix_addr;           /* fixed addr of btree */
-  pgno_t   blk_base[8];         /* block base array for striped node partition */
-  /* ;;: for the blk_base array, code may be simpler if this were an array of
-       BT_page *. */
-  uint8_t  blk_cnt;             /* currently highest valid block base */
-  uint8_t  depth;               /* tree depth */
-#define BP_META  ((uint8_t)0x02)
-  uint8_t  flags;
+  uint64_t  txnid;              // ???? TODO
+  void     *fix_addr;           // fixed address of B+ Tree
+  // XX: code may be simpler if this were an array of BT_page
+  pgno_t   blk_base[8];         // array for B+ Tree stripes
+  uint8_t  blk_cnt;             // highest currently used stripe
+  uint8_t  depth;               // current B+ Tree depth
+#define BP_META  ((uint8_t)0x02)  //  XX: move this into flags
+  uint8_t  flags;               // arbitrary flags; reserved for future use
   uint8_t  _pad1;
-  pgno_t   root;
+  pgno_t   root;                // ???? TODO
   /* 64bit alignment manually checked - 72 bytes total above */
   uint64_t roots[BT_NUMROOTS];  /* for usage by ares */
   uint32_t chk;                 /* checksum */
 } __packed;
 static_assert(sizeof(BT_meta) <= BT_DAT_MAXBYTES);
 
-/* the length of the metapage up to but excluding the checksum */
+// the length of the metapage up to but excluding the checksum
 #define BT_META_LEN (offsetof(BT_meta, chk))
 
+// TODO
 typedef struct BT_mlistnode BT_mlistnode;
 struct BT_mlistnode {
-  /* ;;: lo and hi might as well by (BT_page *) because we don't have any reason
-       to have finer granularity */
-  BYTE *lo;                     /* low virtual address */
-  BYTE *hi;                     /* high virtual address */
-  BT_mlistnode *next;           /* next freelist node */
+  BYTE *lo;                     // low virtual address
+  BYTE *hi;                     // high virtual address
+  BT_mlistnode *next;           // next freelist node
 };
 
+// TODO
 typedef struct BT_nlistnode BT_nlistnode;
 struct BT_nlistnode {
-  BT_page *lo;                  /* low virtual address */
-  BT_page *hi;                  /* high virtual address */
-  BT_nlistnode *next;           /* next freelist node */
+  BT_page *lo;                  // low virtual address
+  BT_page *hi;                  // high virtual address
+  BT_nlistnode *next;           // next freelist node
 };
 
+// TODO
 typedef struct BT_flistnode BT_flistnode;
 struct BT_flistnode {
-  pgno_t lo;                    /* low pgno in persistent file */
-  pgno_t hi;                    /* high pgno in persistent file */
-  BT_flistnode *next;           /* next freelist node */
+  pgno_t lo;                    // low pgno in persistent file
+  pgno_t hi;                    // high pgno in persistent file
+  BT_flistnode *next;           // next freelist node
 };
 
-/* macro to access the metadata stored in a page's data section */
+// macro to access the metadata stored in a page's data section
 #define METADATA(p) ((BT_meta *)(void *)(p)->datc)
 
+// ephemaral state of the PMA
 typedef struct BT_state BT_state;
 struct BT_state {
-  int           data_fd;
-  char         *path;
-  void         *fixaddr;
-  BYTE         *map;
-  BT_meta      *meta_pages[2];  /* double buffered */
-  pgno_t        file_size_p;    /* the size of the pma file in pages */
-  unsigned int  which;          /* which double-buffered db are we using? */
-  BT_nlistnode *nlist;          /* node freelist */
-  BT_mlistnode *mlist;          /* memory freelist */
-  BT_flistnode *flist;          /* pma file freelist */
-  BT_flistnode *pending_flist;
-  BT_nlistnode *pending_nlist;
+  int           data_fd;        // ????? backing file descriptor?
+  char         *path;           // ????? path to backing file?
+  void         *fixaddr;        // ????? TODO
+  BYTE         *map;            // pointer to mmapped backing file
+  BT_meta      *meta_pages[2];  // double-buffered metadata pages
+  pgno_t        file_size_p;    // size of the backing file in pages
+  unsigned int  which;          // which metadata page are we using?
+  BT_nlistnode *nlist;          // node freelist
+  BT_mlistnode *mlist;          // memory freelist
+  BT_flistnode *flist;          // pma file freelist
+  BT_flistnode *pending_flist;  // pending file freelist (not confirmed until sync)
+  BT_nlistnode *pending_nlist;  // pending node freelist (not confirmed until sync)
 };
 
-/*
-
-
 //// ===========================================================================
 ////                            btree internal routines
 
-static void _bt_printnode(BT_page *node) __attribute__((unused)); /* ;;: tmp */
-static int
-_bt_insertdat(vaof_t lo, vaof_t hi, pgno_t fo,
-              BT_page *parent, size_t childidx); /* ;;: tmp */
+/**
+ * Debugging
+ * 
+ * TODO
+ */
+static void _bt_printnode(BT_page *node) __attribute__((unused));
 
+/**
+ * insert lo, hi, and fo in parent's data section for childidx
+ * 
+ * TODO
+ */
+static int
+_bt_insertdat(
+  vaof_t    lo,
+  vaof_t    hi,
+  pgno_t    fo,
+  BT_page  *parent,
+  size_t    childidx);
+
+/**
+ * TODO
+ */ 
 static int _bt_flip_meta(BT_state *);
 
-
-#define BT_MAXDEPTH 4           /* ;;: todo derive it */
+/**
+ * TODO 
+ */
+#define BT_MAXDEPTH 4 //  XX: derive it
 typedef struct BT_findpath BT_findpath;
 struct BT_findpath {
-  BT_page *path[BT_MAXDEPTH];
-  size_t idx[BT_MAXDEPTH];
-  uint8_t depth;
+  BT_page  *path[BT_MAXDEPTH];
+  size_t    idx[BT_MAXDEPTH];
+  uint8_t   depth;
 };
 
-/* _node_get: get a pointer to a node stored at file offset pgno */
+/**
+ * get a pointer to a B+ Tree node stored at B+ Tree offset pgno
+ * 
+ * !!
+ * XX:  Why does this need a special B+ Tree offset? Why doesn't this just use
+ *      regular file offsets?
+ */
 static BT_page *
 _node_get(BT_state *state, pgno_t pgno)
 {
-  /* TODO: eventually, once we can store more than 2M of nodes, this will need
-     to reference the meta page's blk_base array to determine where a node is
-     mapped. i.e:
+  /**
+   * XX:  eventually, once striping is implemented, this will need to determine
+   *      the correct stripe in which a node is mapped:
+   *      - receive pgno
+   *      - find first block i whose first entry exceeds pgno
+   *      - stripe that contains node is (i - 1)
+   *      - offset into block (i - 1) by substracting appropriate base offset
+   * 
+   *      for now, this works because the 2M sector is at the beginning of both
+   *      the memory arena and pma file.
+   */
 
-  - receive pgno
-  - find first pgno in blk_base that exceeds pgno : i
-  - sector that contains node is i-1
-  - appropriately offset into i-1th fixed size partition: 2M, 8M, 16M, ...
+  // indexes 0 and 1 in the backing file are the metadata pages
+  if (pgno <= 1) return 0;
 
-  */
-
-  /* for now, this works because the 2M sector is at the beginning of both the
-     memory arena and pma file
-  */
-  if (pgno <= 1) return 0;      /* no nodes stored at 0 and 1 (metapages) */
-  /* TODO: when partition striping is implemented, a call beyond the furthest
-     block base should result in the allocation of a new block base */
+  /**
+   * XX:  when partition striping is implemented, a call beyond the furthest
+   *      stripe should result in the allocation of a new stripe
+   */
   assert((pgno * BT_PAGESIZE) < MBYTES(2));
   return FO2PA(state->map, pgno);
 }
 
-/* ;;: I don't think we should need this if _bt_nalloc also returns a disc offset */
+/**
+ * convert a B+ Tree node pointer to a B+ Tree offset
+ * 
+ * !!
+ * XX:  Why does this need a special B+ Tree offset? Why doesn't this just use
+ *      regular file offsets?
+ */
 static pgno_t
 _fo_get(BT_state *state, BT_page *node)
 {
   uintptr_t vaddr = (uintptr_t)node;
   uintptr_t start = (uintptr_t)state->map;
+  /**
+   * XX:  not compatible w/ partition striping. when striping is implemented,
+   *      it will need to use the relative start of the containing stripe, and
+   *      add a base offset of pages for that stripe
+   */
   return BY2FO(vaddr - start);
 }
 
+/**
+ * remove allocated memory from the memory freelist
+ * 
+ * input:   1. PMA state
+ *          2. ptr to low mem alloc address
+ *          3. ptr to high mem alloc address
+ */
 static void
 _mlist_record_alloc(BT_state *state, void *lo, void *hi)
 {
+  // get pointer to start of memory freelist
   BT_mlistnode **head = &state->mlist;
   BYTE *lob = lo;
   BYTE *hib = hi;
+  // loop until memory block containing the allocated range is found
   while (*head) {
-    /* found chunk */
+    // to "contain" the allocation, memory block must be equal to the range, or
+    // extend earlier and/or later
     if ((*head)->lo <= lob && (*head)->hi >= hib)
       break;
     assert((*head)->next);
     head = &(*head)->next;
   }
 
+  // if room between high bounds...
   if (hib < (*head)->hi) {
+    // and room between low bounds...
     if (lob > (*head)->lo) {
+      // create a new node to put into the list
+      // left will reuse existing node
       BT_mlistnode *left = *head;
+      // right is a new node
       BT_mlistnode *right = calloc(1, sizeof *right);
       right->hi = left->hi;
       right->lo = hib;
@@ -419,48 +562,68 @@ _mlist_record_alloc(BT_state *state, void *lo, void *hi)
       left->hi = lob;
       left->next = right;
     }
+    // otherwise, lob equal
     else {
-      /* lob equal */
       (*head)->lo = hib;
     }
   }
+  // otherwise, hib equal but if room between low bounds...
   else if (lob > (*head)->lo) {
-    /* hib equal */
     (*head)->hi = lob;
   }
+  // otherwise, exact range
   else {
-    /* equals */
+    // delete node and condense freelist
     BT_mlistnode *next = (*head)->next;
     free(*head);
     *head = next;
   }
 }
 
+/**
+ * XX:  once striping is implemented, will grow the nlist by allocating the next
+ *      sized stripe and will handle storing the offset of this stripe.
+ *
+ *      probably will also need to appropriately modify the flist so that the
+ *      nlist isn't clobbered by data allocations.
+ */
 static void
 _nlist_grow(BT_state *state)
-/* grows the nlist by allocating the next sized stripe from the block base
-   array. Handles storing the offset of this stripe in state->blk_base */
 {
-  /* ;;: i believe this will also need to appropriately modify the flist so
-       that we don't store general allocation data in node partitions */
+  //
 }
 
+/**
+ * remove allocated B+ Tree node from node freelist
+ * 
+ * input:   1. PMA state
+ *          2. ptr to beginning of allocated page
+ */
 static void
 _nlist_record_alloc(BT_state *state, BT_page *lo)
 {
+  // get pointer to start of B+ Tree node freelist
   BT_nlistnode **head = &state->nlist;
+  // next node page (works because of pointer math)
   BT_page *hi = lo + 1;
+  // loop until the node block containing the allocated node is found
   while (*head) {
-    /* found chunk */
+    // to "contain" the node, memory block must be equal to the range, or
+    // extend earlier and/or later
     if ((*head)->lo <= lo && (*head)->hi >= hi)
       break;
     assert((*head)->next);
     head = &(*head)->next;
   }
 
+  // if room between high bounds...
   if (hi < (*head)->hi) {
+    // and room between low bounds...
     if (lo > (*head)->lo) {
+      // create a new node to put into the list
+      // left will reuse existing noe
       BT_nlistnode *left = *head;
+      // right is a new node
       BT_nlistnode *right = calloc(1, sizeof *right);
       right->hi = left->hi;
       right->lo = hi;
@@ -468,38 +631,54 @@ _nlist_record_alloc(BT_state *state, BT_page *lo)
       left->hi = lo;
       left->next = right;
     }
+    // otherwise, lo equal
     else {
-      /* lo equal */
       (*head)->lo = hi;
     }
   }
+  // otherwise, hi equal but if room between low bound...
   else if (lo > (*head)->lo) {
-    /* hi equal */
     (*head)->hi = lo;
   }
+  // otherwise, exact range
   else {
-    /* equals */
+    // delete node and condense list
     BT_nlistnode *next = (*head)->next;
     free(*head);
     *head = next;
   }
 }
 
+/**
+ * remove allocated file pages from the file page freelist
+ * 
+ * input:   1. PMA state
+ *          2. low file page offset (inclusive)
+ *          3. high file page offset (exclusive)
+ */
 static void
 _flist_record_alloc(BT_state *state, pgno_t lo, pgno_t hi)
 {
+  // get pointer to start of disk freelist
   BT_flistnode **head = &state->flist;
+  // loop until disk block containing the allocated range is found
   while (*head) {
-    /* found chunk */
+    // to "contain" the allocation, disk block must be equal to the range, or
+    // extend earlier and/or later
     if ((*head)->lo <= lo && (*head)->hi >= hi)
       break;
     assert((*head)->next);
     head = &(*head)->next;
   }
 
+  // if room between high bounds...
   if (hi < (*head)->hi) {
+    // and room between low bounds...
     if (lo > (*head)->lo) {
+      // create a new node to put into the list
+      // left will reuse existing node
       BT_flistnode *left = *head;
+      // right is a new node
       BT_flistnode *right = calloc(1, sizeof *right);
       right->hi = left->hi;
       right->lo = hi;
@@ -507,52 +686,66 @@ _flist_record_alloc(BT_state *state, pgno_t lo, pgno_t hi)
       left->hi = lo;
       left->next = right;
     }
+    // otherwise, lo equal
     else {
-      /* lo equal */
       (*head)->lo = hi;
     }
   }
+  // otherwise, hi equal but if room between low bounds...
   else if (lo > (*head)->lo) {
-    /* hi equal */
     (*head)->hi = lo;
   }
+  // otherwise, exact range
   else {
-    /* equals */
     BT_flistnode *next = (*head)->next;
     free(*head);
     *head = next;
   }
 }
 
+/**
+ * allocate a node from the B+ Tree node freelist
+ */
 static BT_page *
 _bt_nalloc(BT_state *state)
-/* allocate a node in the node freelist */
 {
-  /* TODO: maybe change _bt_nalloc to return both a file and a node offset as
-     params to the function and make actual return value an error code. This is
-     to avoid forcing some callers to immediately use _fo_get */
+  /**
+   * XX:  maybe take an argument into which to store the result node offset, and
+   *      make the function return an error code? this will avoid forcing an
+   *      immediate call to _fo_get
+   */
+
+  // get pointer to start of node freelist
   BT_nlistnode **n = &state->nlist;
   BT_page *ret = 0;
 
+  // find an open node in the B+ Tree node freelist
   for (; *n; n = &(*n)->next) {
+    // size of node range
     size_t sz_p = (*n)->hi - (*n)->lo;
 
-    /* ;;: refactor? this is ridiculous */
+    // if node range bigger than 1...
+    // XX: how could it possibly be less than 1?
     if (sz_p >= 1) {
+      // select the first page of the node range
       ret = (*n)->lo;
+      // remove the selected node from the B+ Tree node freelist
       _nlist_record_alloc(state, ret);
       break;
     }
   }
 
+  // if no nodes available...
   if (ret == 0) {
-    /* ;;: todo: insert a grow call */
+    // return NULL
     DPUTS("nlist out of mem!");
+    // XX:  NULL
     return 0;
   }
 
-  /* make node writable */
+  // make the allocated node writable
   if (mprotect(ret, sizeof(BT_page), BT_PROT_DIRTY) != 0) {
+    // XX:  abort on failure for now
     DPRINTF("mprotect of node: %p failed with %s", ret, strerror(errno));
     abort();
   }
@@ -560,38 +753,61 @@ _bt_nalloc(BT_state *state)
   return ret;
 }
 
+/**
+ * clone a B+ Tree node
+ * 
+ * input:   1. PMA state
+ *          2. input node to copy
+ *          3. offset of cloned node
+ */
 static int
 _node_cow(BT_state *state, BT_page *node, pgno_t *pgno)
 {
-  BT_page *ret = _bt_nalloc(state); /* ;;: todo: assert node has no dirty entries */
+  // allocate a node from the node freelist
+  //    later will need to assert that the node has no dirty entries
+  // XX:  how could a newly allocated node already have dirty entries?
+  BT_page *ret = _bt_nalloc(state);
+  // copy the data of the input node to the newly allocated node
   memcpy(ret->datk, node->datk, sizeof node->datk[0] * BT_DAT_MAXKEYS);
+  // get the page offset of the allocated node
   *pgno = _fo_get(state, ret);
   return BT_SUCC;
 }
 
-static void *
-_bt_bsearch(BT_page *page, vaof_t va) __attribute((unused));
+//  XX: unused
+// static void *
+// _bt_bsearch(BT_page *page, vaof_t va) __attribute((unused));
+//
+// /* binary search a page's data section for a va. Returns a pointer to the found BT_dat */
+// static void *
+// _bt_bsearch(BT_page *page, vaof_t va)
+// {
+//   /* ;;: todo: actually bsearch rather than linear */
+//   for (BT_kv *kv = &page->datk[0]; kv <= (BT_kv *)BT_dat_maxva(page); kv++) {
+//     if (kv->va == va)
+//       return kv;
+//   }
+//
+//   return 0;
+// }
 
-/* binary search a page's data section for a va. Returns a pointer to the found BT_dat */
-static void *
-_bt_bsearch(BT_page *page, vaof_t va)
-{
-  /* ;;: todo: actually bsearch rather than linear */
-  for (BT_kv *kv = &page->datk[0]; kv <= (BT_kv *)BT_dat_maxva(page); kv++) {
-    if (kv->va == va)
-      return kv;
-  }
-
-  return 0;
-}
-
+/**
+ * looks up a child index for an address range in a B+ Tree node
+ * 
+ * input:   1. node to search
+ *          2. start of address range as page index (inclusive)
+ *          3. end of address range as page index (exclusive)
+ * 
+ * output:  index of child of node that includes input address range
+ */
 static size_t
 _bt_childidx(BT_page *node, vaof_t lo, vaof_t hi)
-/* looks up the child index in a parent node. If not found, return is
-   BT_DAT_MAXKEYS */
 {
   size_t i = 0;
+  // loop over all child nodes
+  //  XX: but not all child nodes might be in use...
   for (; i < BT_DAT_MAXKEYS - 1; i++) {
+    // return the index of the child 
     vaof_t llo = node->datk[i].va;
     vaof_t hhi = node->datk[i+1].va;
     if (llo <= lo && hhi >= hi)
@@ -600,8 +816,18 @@ _bt_childidx(BT_page *node, vaof_t lo, vaof_t hi)
   return BT_DAT_MAXKEYS;
 }
 
-/* ;;: find returns a path to nodes that things should be in if they are there. */
-/* a leaf has a meta page depth eq to findpath depth */
+/**
+ * returns a walk through the B+ Tree for a memory allocation
+ * 
+ * input:   1. PMA state XX: never used
+ *          2. latest node in path
+ *          3. path through B+ Tree that we're constructing
+ *          4. expected depth at which to find leaves
+ *          5. start of address range as page index (inclusive)
+ *          6. start of address range as page index (exclusive)
+ * 
+ * output:  0 iff success; found path is populated into path ptr
+ */
 static int
 _bt_find2(BT_state *state,
           BT_page *node,
@@ -610,68 +836,101 @@ _bt_find2(BT_state *state,
           vaof_t lo,
           vaof_t hi)
 {
-  /* ;;: meta node stores depth (node or leaf?)
-     look at root node and binsearch BT_dats where low is <= lo and high is >= hi
-     If at depth of metapage (a leaf), then done
-     otherwise grab node, increment depth, save node in path
-  */
+  // check for depth limit
   if (path->depth > maxdepth)
+    //  XX: what? why ENOENT? means "no such file or directory"...
     return ENOENT;
 
   assert(node != 0);
 
+  // exit with error if child index for range not found
   size_t i;
   if ((i = _bt_childidx(node, lo, hi)) == BT_DAT_MAXKEYS)
     return ENOENT;
 
+  // if we're at expected leaf depth...
   if (path->depth == maxdepth) {
+    // add index to path
     path->idx[path->depth] = i;
+    // add node to path
     path->path[path->depth] = node;
+    // done
     return BT_SUCC;
   }
-  /* then branch */
+  // otherwise...
   else {
+    // get file offset of child node
     pgno_t fo = node->datk[i].fo;
+    // get a pointer to the B+ Tree node stored at that offset
     BT_page *child = _node_get(state, fo);
+    // add the node and child index to the path
     path->idx[path->depth] = i;
     path->path[path->depth] = node;
+    // keep searching in the child node
     path->depth++;
     return _bt_find2(state, child, path, maxdepth, lo, hi);
   }
 }
 
+/**
+ * Setup the root of a completely empty B+ Tree
+ * 
+ * input:   1. metadata page XX: unused
+ *          2. B+ Tree page to populate as new root
+ */
 static void
 _bt_root_new(BT_meta *meta, BT_page *root)
 {
-  /* The first usable address in the PMA is just beyond the btree segment */
+  // The first usable address in the PMA is just beyond the first B+ Tree segment
   root->datk[0].va = B2PAGES(BLK_BASE_LEN_TOTAL);
   root->datk[0].fo = 0;
   root->datk[1].va = UINT32_MAX;
   root->datk[1].fo = 0;
 }
 
+/**
+ * returns a walk through the B+ Tree for a memory allocation
+ * 
+ * input:   1. PMA state
+ *          2. path through B+ Tree that we're constructing
+ *          3. start of address range as page index (inclusive)
+ *          4. start of address range as page index (exclusive)
+ * 
+ * output:  0 iff success
+ */
 static int
 _bt_find(BT_state *state, BT_findpath *path, vaof_t lo, vaof_t hi)
 {
+  // next index in path to populate
   path->depth = 1;
+  // get current metadata page
   BT_meta *meta = state->meta_pages[state->which];
+  // get the B+ Tree root as a node
   BT_page *root = _node_get(state, meta->root);
+  // set the expected B+ Tree leaf depth
   uint8_t maxdepth = meta->depth;
+  // get a walk from the root to the leaf of the B+ Tree for the given address
+  // range
   return _bt_find2(state, root, path, maxdepth, lo, hi);
 }
 
-static int
-_bt_findpath_is_root(BT_findpath *path) __attribute((unused));
+// XX:  unused
+// static int
+// _bt_findpath_is_root(BT_findpath *path) __attribute((unused));
+//
+// static int
+// _bt_findpath_is_root(BT_findpath *path)
+// {
+//   assert(path != 0);
+//   return path->depth == 0;
+// }
 
-static int
-_bt_findpath_is_root(BT_findpath *path)
-{
-  assert(path != 0);
-  return path->depth == 0;
-}
-
-/* _bt_numkeys: find next empty space in node's data section. Returned as
-   index into node->datk. If the node is full, return is BT_DAT_MAXKEYS */
+/**
+ * find next unused child index in B+ Tree node
+ * 
+ * input:   node in which to find next unused child index
+ * output:  next unused child index in B+ Tree node (or BT_DAT_MAXKEYS if full)
+ */
 static size_t
 _bt_numkeys(BT_page *node)
 {
@@ -682,62 +941,109 @@ _bt_numkeys(BT_page *node)
   return i;
 }
 
+/**
+ * shift B+ Tree node data at child index i over by n KVs
+ * 
+ * input:   1. node whose data to shift
+ *          2. target child slot
+ *          3. number of slot pairs to shift back
+ * 
+ * output:  0 or program crashes
+ */
 static int
 _bt_datshift(BT_page *node, size_t i, size_t n)
-/* shift data segment at i over by n KVs */
 {
-  assert(i+n < BT_DAT_MAXKEYS); /* check buffer overflow */
+  // check for buffer overflow
+  assert(i+n < BT_DAT_MAXKEYS);
   size_t siz = sizeof node->datk[0];
+  // compute the byte length of the node beyond the destination slot
   size_t bytelen = (BT_DAT_MAXKEYS - i - n) * siz;
+  // shift everything in the target slot and beyond
   memmove(&node->datk[i+n], &node->datk[i], bytelen);
-  ZERO(&node->datk[i], n * siz); /* NB: not completely necessary */
+  // zero out the old target slot
+  ZERO(&node->datk[i], n * siz);]
   return BT_SUCC;
 }
 
-/* _bt_split_datcopy: copy right half of left node to right node */
+/**
+ * split a node by copying the right half of its data over to another node
+ * 
+ * input:   1. node from which to copy
+ *          2. node to which to copy
+ * 
+ * output:  always 0
+ */
 static int
 _bt_split_datcopy(BT_page *left, BT_page *right)
 {
+  // XX:  these are flat values, should just br precalculated
   size_t mid = BT_DAT_MAXKEYS / 2;
   size_t bytelen = mid * sizeof(left->datk[0]);
-  /* copy rhs of left to right */
+  // copy right half of left node entries to right node
   memcpy(right->datk, &left->datk[mid], bytelen);
-  /* zero rhs of left */
-  ZERO(&left->datk[mid], bytelen); /* ;;: note, this would be unnecessary if we stored node.N */
-  /* the last entry in left should be the first entry in right */
+  // zero out right half of left node
+  ZERO(&left->datk[mid], bytelen);
+  // the last entry in left node is the first entry in right node
   left->datk[mid].va = right->datk[0].va;
 
   return BT_SUCC;
 }
 
+/**
+ * check if child page of B+ Tree node at index is dirty
+ * 
+ * input:   1. B+ Tree node
+ *          2. child index
+ * 
+ * output:  true iff dirty; false otherwise
+ */
 static int
 _bt_ischilddirty(BT_page *parent, size_t child_idx)
 {
+  // XX:  this should be a constant derived from other constants
   assert(child_idx < 2048);
   uint8_t flag = parent->head.dirty[child_idx >> 3];
   return flag & (1 << (child_idx & 0x7));
 }
 
-/* ;;: todo: name the 0x8 and 4 literals and/or generalize */
+/**
+ * mark a child page of B+ Tree at index dirty
+ * 
+ * input:   1. B+ Tree node
+ *          2. child index
+ * 
+ * output:  0 always
+ */
 static int
 _bt_dirtychild(BT_page *parent, size_t child_idx)
 {
   assert(child_idx < 2048);
-  /* although there's nothing theoretically wrong with dirtying a dirty node,
-     there's probably a bug if we do it since a we only dirty a node when it's
-     alloced after a split or CoWed */
+   // although there's nothing theoretically wrong with dirtying a dirty node,
+   // there's probably a bug if we do it since a we only dirty a node when
+   // it's alloced after a split or CoWed
   assert(!_bt_ischilddirty(parent, child_idx));
   uint8_t *flag = &parent->head.dirty[child_idx >> 3];
   *flag |= 1 << (child_idx & 0x7);
   return BT_SUCC;
 }
 
+/**
+ * mark a child page of B+ Tree at index dirty
+ * 
+ * the same as _bt_dirtychild, with the exception that we don't assert the
+ * dirty bit isn't set, because data may be written to the same page multiple
+ * times (e.g. a malloc-free-malloc cycle).
+ * 
+ * XX:  above implies we ALWAYS know when we're dealing with an internal node
+ *      and when we're dealing with a leaf
+ * 
+ * input:   1. B+ Tree node
+ *          2. child index
+ * 
+ * output:  0 always
+ */
 static int
 _bt_dirtydata(BT_page *leaf, size_t child_idx)
-/* effectively the same as _bt_dirtychild (setting the dirty bit at child_idx in
-   the given node), with the exception that we don't assert the dirty bit isn't
-   set. (Data may be written to the same fileoffset multiple times (a
-   malloc-free-malloc cycle) */
 {
   assert(child_idx < 2048);
   uint8_t *flag = &leaf->head.dirty[child_idx >> 3];
@@ -745,62 +1051,108 @@ _bt_dirtydata(BT_page *leaf, size_t child_idx)
   return BT_SUCC;
 }
 
+/**
+ * mark a child page of B+ Tree at index clean
+ * 
+ * input:   1. B+ Tree node
+ *          2. child index
+ * 
+ * output:  0 always
+ */
 static int
 _bt_cleanchild(BT_page *parent, size_t child_idx)
 {
+  // reuses the child index check of _bt_ischilddirty
   assert(_bt_ischilddirty(parent, child_idx));
   uint8_t *flag = &parent->head.dirty[child_idx >> 3];
+  // this presumes that the value is dirty, though there's a check for this above
   *flag ^= 1 << (child_idx & 0x7);
   return BT_SUCC;
 }
 
-/* ;:: assert that the node is dirty when splitting */
+/**
+ * XX:  assert that the node is dirty when splitting
+ * XX:  better error handling
+ * 
+ * split a B+ Tree node into two
+ * 
+ * input:   1. PMA state
+ *          2. B+ Tree node containing node to split
+ *          3. index of node to split
+ *          4. pointer to index of new node for storing result
+ * 
+ * output:  0 iff success;
+ *          ENOMEM iff out of memory for B+ Tree nodes
+ */
 static int
 _bt_split_child(BT_state *state, BT_page *parent, size_t i, pgno_t *newchild)
 {
-  /* ;;: todo: better error handling */
+  // require that child to split be dirty
   assert(_bt_ischilddirty(parent, i));
 
   int rc = BT_SUCC;
   size_t N;
+  // child to split becomes left node
   BT_page *left = _node_get(state, parent->datk[i].fo);
+  // allocate new right node
   BT_page *right = _bt_nalloc(state);
+  // return error if out of B+ Tree nodes
   if (right == 0)
     return ENOMEM;
+  // split the left node into two
   if (!SUCC(rc = _bt_split_datcopy(left, right)))
     return rc;
 
-  /* adjust high address of left node in parent */
+  // adjust high address of left node in parent
+  // XX: wat? this doesn't adjust anything. I think it's already adjust by the split
   N = _bt_numkeys(left);
 
-  /* insert reference to right child into parent node */
+  // find the first unused child in right
   N = _bt_numkeys(right);
+  // read low and high bounds from the new node
   vaof_t lo = right->datk[0].va;
   vaof_t hi = right->datk[N-1].va;
 
+  // TODO
   _bt_insertdat(lo, hi, _fo_get(state, right), parent, i);
 
-  /* dirty right child */
+  // lookup the index of the right node in the parent
   size_t ridx = _bt_childidx(parent, lo, hi);
-  assert(ridx == i+1);          /* 0x100000020100;;: tmp? */
+  // confirm that it's one more than the index of the node that was split
+  assert(ridx == i+1);
+  // dirty the right child node
   _bt_dirtychild(parent, ridx);
 
-  /* ;;: fix this */
+  // return the B+ Tree node offset of the new child node
   *newchild = _fo_get(state, right);
 
   return BT_SUCC;
 }
 
-static int
-_bt_rebalance(BT_state *state, BT_page *node) __attribute((unused));
+// XX:  unused
+// static int
+// _bt_rebalance(BT_state *state, BT_page *node) __attribute((unused));
+//
+// static int
+// _bt_rebalance(BT_state *state, BT_page *node)
+// {
+//   return 255;
+// }
 
-static int
-_bt_rebalance(BT_state *state, BT_page *node)
-{
-  return 255;
-}
 
-/* insert lo, hi, and fo in parent's data section for childidx */
+
+
+
+
+
+
+
+
+
+
+
+
+
 static int
 _bt_insertdat(vaof_t lo, vaof_t hi, pgno_t fo,
               BT_page *parent, size_t childidx)
@@ -857,11 +1209,8 @@ _bt_insertdat(vaof_t lo, vaof_t hi, pgno_t fo,
   return BT_SUCC;
 }
 
-
 //// ===========================================================================
 ////                           wip - deletion coalescing
-
-/* ;;: todo: rename routines */
 
 int
 _bt_delco_1pass_0(BT_state *state, vaof_t lo, vaof_t hi,
@@ -1137,7 +1486,6 @@ _pending_flist_merge(BT_state *state)
   state->pending_flist = 0;
 }
 
-
 /* ;;: todo move shit around */
 static void
 _bt_delco_droptree2(BT_state *state, pgno_t nodepg,
@@ -2626,7 +2974,6 @@ _bt_sync(BT_state *state, BT_page *node, uint8_t depth, uint8_t maxdepth)
   return BT_SUCC;
 }
 
-
 //// ===========================================================================
 ////                            btree external routines
 
@@ -2697,23 +3044,30 @@ bt_state_close(BT_state *state)
   return BT_SUCC;
 }
 
+/**
+ * 
+ */
 void *
 bt_malloc(BT_state *state, size_t pages)
 {
-  BT_mlistnode **n = &state->mlist;
-  void *ret = 0;
-  /* first fit */
+  BT_mlistnode  **n = &state->mlist;
+  void           *ret = 0;
+
+  // 
   for (; *n; n = &(*n)->next) {
+    // number of pages that range covers
     size_t sz_p = addr2off((*n)->hi) - addr2off((*n)->lo);
 
+    // if the size of the memory range is bigger than the allocation...
     if (sz_p >= pages) {
+      // return range from freelist and update freelist
       ret = (*n)->lo;
       BT_page *hi = ((BT_page *)ret) + pages;
       _mlist_record_alloc(state, ret, hi);
       break;
     }
-    // XX return early if nothing suitable found in freelist
   }
+  // XX: so all memory is stored in the freelist?
   if (ret == 0) {
     DPUTS("mlist out of mem!");
     return 0;
